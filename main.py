@@ -31,7 +31,9 @@ class Config:
         "COIN_PAGE_READY": ".check-box",
         "COIN_NOW": ".check-box .total-coins",
         "GET_COIN": ".check-box .check-in-tip",
-        "COIN_REGULAR": ".check-box .top-btn.Regular"
+        "COIN_REGULAR": ".check-box .top-btn.Regular",
+        "COIN_VALUE": "._37aS8q",
+        "COIN_BUTTON": "._1Puh5H"
     }
     elements_by_name = {
         "LOGIN_USER": "loginKey",
@@ -39,7 +41,7 @@ class Config:
     }
     urls = {
         "INDEX": "https://shopee.tw",
-        "COIN_PAGE": "https://shopee.tw/shopee-coins-internal/?scenario=1"
+        "COIN_PAGE": "https://shopee.tw/shopee-coins"
     }
     path = os.path.dirname(os.path.abspath(__file__))
 
@@ -48,8 +50,8 @@ class Logger(Config):
     def __init__(self):
         path = os.path.join(self.path, self.LOGGING_PATH)
         path = "{}/{}".format(path, datetime.datetime.now().strftime("shopee.%Y-%m.log"))
-        if not os.path.exists(path):
-            os.makedirs(path)
+#        if not os.path.exists(path):
+#            os.makedirs(path)
         logging_level = logging.DEBUG if self.DEBUG else logging.INFO
         logger = logging.getLogger()
         logger.setLevel(logging_level)
@@ -75,7 +77,7 @@ class Driver(Config):
         chrome_options = Options()
         # Hide the chromedriver
         if not self.DEBUG or self.path == '/code':
-            chrome_options.add_argument('--headless')
+#            chrome_options.add_argument('--headless')
             chrome_options.add_argument('--start-maximized')
             chrome_options.add_argument('disable-infobars')
             chrome_options.add_argument('--disable-extensions')
@@ -104,21 +106,44 @@ class Driver(Config):
             selector = By.CSS_SELECTOR
             target = self.elements_by_css.get(target)
 
-        WebDriverWait(self.driver, self.WAIT_TIMEOUT).until(
-            EC.presence_of_element_located((selector, target))
-        )
+        try:
+            element = WebDriverWait(self.driver, self.WAIT_TIMEOUT).until(
+                EC.presence_of_element_located((selector, target))
+            )
+            if isinstance(element, webdriver.remote.webelement.WebElement):
+                logger.info( "Found <{} \"{}\">{}</>".format(element.tag_name, target, element.text) )
+                return element
+
+        except Exception as e:
+            logger.error(repr(e))
+
+        return False
 
     def find(self, method=None, target=None):
-        if method == 'css':
-            target = self.elements_by_css.get(target)
-            result = self.driver.find_elements_by_css_selector(target)
-        if method == 'name':
-            target = self.elements_by_name.get(target)
-            result = self.driver.find_elements_by_name(target)
+        try:
+            if method == 'css':
+                target = self.elements_by_css.get(target)
+                result = self.driver.find_elements_by_css_selector(target)
+            if method == 'name':
+                target = self.elements_by_name.get(target)
+                result = self.driver.find_elements_by_name(target)
 
-        logger.debug(result)
-        return result[0] if len(result) is 1 else result
+            if (len(result) is 1) and isinstance(result[0], webdriver.remote.webelement.WebElement):
+                logger.info( "Found <{} \"{}\">{}</>".format(result[0].tag_name, target, result[0].text) )
+                return result[0]
 
+        except Exception as e:
+            logger.error(repr(e))
+
+        return False
+
+def has_substr( string, substring ):
+    ''' str.find() doesn't work, convert to byte data and use keyword 'in'
+    if coin_button.text.find('登入'): True
+    if coin_button.text.find('領取'): True
+    if coin_button.text.find('簽到'): True
+    '''
+    return substring.encode('utf-8') in string.encode('utf-8')
 
 class Crawler(Driver, Config):
 
@@ -131,17 +156,11 @@ class Crawler(Driver, Config):
             pop = self.find("css", "POP_MODAL")
             pop.click()
             logger.info("pop modal close")
-        except :
-            logger.info("pop modal not found")
+        except Exception as e:
+            logger.info("pop modal not found: " + repr(e))
 
     def checkLogin(self):
-        try:
-            self.wait_until("css", "AVATAR")
-            logger.info("Login Success")
-            return True
-        except Exception as e:
-            logger.info("Login Failed")
-            return False
+        return bool(self.wait_until("css", "AVATAR"))
 
     def loginByCookie(self, cookieName):
         try:
@@ -158,7 +177,7 @@ class Crawler(Driver, Config):
             login_button.click()
             self.wait_until("css", "LOGIN_SUBMIT")
         except Exception as e:
-            logger.error("Login Modal not showing"+repr(e))
+            logger.error("Login Modal not showing: "+repr(e))
             self.close()
         try:
             # Enter Account & Password
@@ -171,9 +190,31 @@ class Crawler(Driver, Config):
             submitButtom.click()
             logger.info("Use password to login")
         except Exception as e:
-            logger.error("Wrong account and password"+repr(e))
+            logger.error("Wrong account and password: "+repr(e))
             self.close()
-            sys.exit(0)
+
+    def login(self):
+        ''' login manually or by cookie
+        '''
+        self.getRequest("COIN_PAGE")
+        coin_button = self.wait_until("css", "COIN_BUTTON")
+        if not coin_button:
+            logger.info("Page loading error!")
+            return False
+        if has_substr(coin_button.text, '登入'):
+            self.loginByCookie(cookie_name)
+            if not self.checkLogin():
+                coin_button.click()
+                input('Please login before proceed! Press <enter> to continue!')
+            else:
+                logger.info( "Login by cookie!" )
+        if self.checkLogin():
+            logger.info("Login successful!")
+            self.saveCookie(cookie_name)
+        else:
+            logger.info("Cannot login!")
+            return False
+        return True
 
     def checkSMS(self):
         try:
@@ -201,7 +242,7 @@ class Crawler(Driver, Config):
                 self.close()
                 sys.exit(0)
         except Exception as e:
-            logger.info("No need SMS authenticate"+repr(e))
+            logger.info("No need SMS authenticate: "+repr(e))
 
     def clickCoin(self):
         try:
@@ -230,6 +271,35 @@ class Crawler(Driver, Config):
             logger.error(repr(e))
             self.close()
 
+    def claimCoin(self):
+        if not self.login():
+            self.driver.close()
+            return False
+        coin_button = self.wait_until("css", "COIN_BUTTON")
+        if coin_button:
+            if has_substr(coin_button.text, '簽到'):
+                logger.info( "Claiming coin for today..." )
+                coin_button.click()
+                coin_button = self.wait_until("css", "COIN_BUTTON")
+        else:
+            logger.info("Coin button not found!")
+            self.driver.close()
+            return False
+        coin_value = self.find("css", "COIN_VALUE")
+        if coin_value:
+            last_value = ''
+            # wait while the coin value counting
+            while coin_value.text != last_value:
+                last_value = coin_value.text
+                sleep(1)
+            logger.info("目前有 " + coin_value.text + " 蝦幣, " + coin_button.text)
+        else:
+            logger.info("Coin value not found!")
+            self.driver.close()
+            return False
+        self.driver.close()
+        return True
+
     def run(self):
         self.getRequest("INDEX")
         self.checkPopModal()
@@ -255,4 +325,5 @@ class Crawler(Driver, Config):
 
 
 if __name__ == "__main__":
-    Crawler().run()
+    Crawler().claimCoin()
+
