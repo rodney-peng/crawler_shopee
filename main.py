@@ -5,13 +5,13 @@ import logging
 import datetime
 import inspect
 from env import *
-from time import gmtime, strftime,sleep
+from time import gmtime, strftime, sleep
+from selenium.common.exceptions import TimeoutException
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
 class Config:
@@ -86,12 +86,12 @@ class Driver(Config):
         self.driver = webdriver.Chrome('chromedriver',options=chrome_options)
         self.driver.set_window_size(width, height)
         self.path = os.path.dirname(os.path.abspath(__file__))
-        print("Init driver done.")
+        logger.debug("Init driver done.")
 
     def saveCookie(self, cookieName):
         with open(self.path + '/' + cookieName, 'wb') as filehandler:
             pickle.dump(self.driver.get_cookies(), filehandler)
-        logger.info("Save cookie to {}".format(cookieName))
+        logger.debug("Save cookie to {}".format(cookieName))
 
     def loadCookie(self, cookieName):
         with open(self.path + '/' + cookieName, 'rb') as cookiesfile:
@@ -111,8 +111,11 @@ class Driver(Config):
                 EC.presence_of_element_located((selector, target))
             )
             if isinstance(element, webdriver.remote.webelement.WebElement):
-                logger.info( "Found <{} \"{}\">{}</>".format(element.tag_name, target, element.text) )
+                logger.debug( "Found <{} \"{}\">{}</>".format(element.tag_name, target, element.text) )
                 return element
+
+        except TimeoutException:
+            logger.info( "Target \"{}\" not found!".format(target) )
 
         except Exception as e:
             logger.error(repr(e))
@@ -129,21 +132,13 @@ class Driver(Config):
                 result = self.driver.find_elements_by_name(target)
 
             if (len(result) is 1) and isinstance(result[0], webdriver.remote.webelement.WebElement):
-                logger.info( "Found <{} \"{}\">{}</>".format(result[0].tag_name, target, result[0].text) )
+                logger.debug( "Found <{} \"{}\">{}</>".format(result[0].tag_name, target, result[0].text) )
                 return result[0]
 
         except Exception as e:
             logger.error(repr(e))
 
         return False
-
-def has_substr( string, substring ):
-    ''' str.find() doesn't work, convert to byte data and use keyword 'in'
-    if coin_button.text.find('登入'): True
-    if coin_button.text.find('領取'): True
-    if coin_button.text.find('簽到'): True
-    '''
-    return substring.encode('utf-8') in string.encode('utf-8')
 
 class Crawler(Driver, Config):
 
@@ -156,17 +151,23 @@ class Crawler(Driver, Config):
             pop = self.find("css", "POP_MODAL")
             pop.click()
             logger.info("pop modal close")
-        except Exception as e:
-            logger.info("pop modal not found: " + repr(e))
+        except :
+            logger.info("pop modal not found")
 
     def checkLogin(self):
-        return bool(self.wait_until("css", "AVATAR"))
+        try:
+            self.wait_until("css", "AVATAR")
+            logger.info("Login Success")
+            return True
+        except Exception as e:
+            logger.info("Login Failed")
+            return False
 
     def loginByCookie(self, cookieName):
         try:
             self.loadCookie(cookieName)
             self.driver.refresh()
-            logger.info("Use {} to login".format(cookieName))
+            logger.debug("Use {} to login".format(cookieName))
         except Exception as e:
             logger.info("{} not found".format(cookieName))
 
@@ -177,7 +178,7 @@ class Crawler(Driver, Config):
             login_button.click()
             self.wait_until("css", "LOGIN_SUBMIT")
         except Exception as e:
-            logger.error("Login Modal not showing: "+repr(e))
+            logger.error("Login Modal not showing"+repr(e))
             self.close()
         try:
             # Enter Account & Password
@@ -190,31 +191,9 @@ class Crawler(Driver, Config):
             submitButtom.click()
             logger.info("Use password to login")
         except Exception as e:
-            logger.error("Wrong account and password: "+repr(e))
+            logger.error("Wrong account and password"+repr(e))
             self.close()
-
-    def login(self):
-        ''' login manually or by cookie
-        '''
-        self.getRequest("COIN_PAGE")
-        coin_button = self.wait_until("css", "COIN_BUTTON")
-        if not coin_button:
-            logger.info("Page loading error!")
-            return False
-        if has_substr(coin_button.text, '登入'):
-            self.loginByCookie(cookie_name)
-            if not self.checkLogin():
-                coin_button.click()
-                input('Please login before proceed! Press <enter> to continue!')
-            else:
-                logger.info( "Login by cookie!" )
-        if self.checkLogin():
-            logger.info("Login successful!")
-            self.saveCookie(cookie_name)
-        else:
-            logger.info("Cannot login!")
-            return False
-        return True
+            sys.exit(0)
 
     def checkSMS(self):
         try:
@@ -242,7 +221,7 @@ class Crawler(Driver, Config):
                 self.close()
                 sys.exit(0)
         except Exception as e:
-            logger.info("No need SMS authenticate: "+repr(e))
+            logger.info("No need SMS authenticate"+repr(e))
 
     def clickCoin(self):
         try:
@@ -271,35 +250,6 @@ class Crawler(Driver, Config):
             logger.error(repr(e))
             self.close()
 
-    def claimCoin(self):
-        if not self.login():
-            self.driver.close()
-            return False
-        coin_button = self.wait_until("css", "COIN_BUTTON")
-        if coin_button:
-            if has_substr(coin_button.text, '簽到'):
-                logger.info( "Claiming coin for today..." )
-                coin_button.click()
-                coin_button = self.wait_until("css", "COIN_BUTTON")
-        else:
-            logger.info("Coin button not found!")
-            self.driver.close()
-            return False
-        coin_value = self.find("css", "COIN_VALUE")
-        if coin_value:
-            last_value = ''
-            # wait while the coin value counting
-            while coin_value.text != last_value:
-                last_value = coin_value.text
-                sleep(1)
-            logger.info("目前有 " + coin_value.text + " 蝦幣, " + coin_button.text)
-        else:
-            logger.info("Coin value not found!")
-            self.driver.close()
-            return False
-        self.driver.close()
-        return True
-
     def run(self):
         self.getRequest("INDEX")
         self.checkPopModal()
@@ -323,7 +273,79 @@ class Crawler(Driver, Config):
         logger.info("Program exit")
         sys.exit(0)
 
+from contextlib import contextmanager
+
+def has_substr( string, substring ):
+    ''' str.find() doesn't work, convert to byte data and use keyword 'in'
+    if coin_button.text.find('登入'): True
+    if coin_button.text.find('領取'): True
+    if coin_button.text.find('簽到'): True
+    '''
+    return substring.encode('utf-8') in string.encode('utf-8')
+
+class ShopeeWeb(Crawler):
+
+    def checkLogin(self):
+        return bool(self.wait_until("css", "AVATAR"))
+
+    def login(self):
+        ''' login by cookie or manually
+        '''
+        self.getRequest("COIN_PAGE")
+        coin_button = self.wait_until("css", "COIN_BUTTON")
+        if not coin_button:
+            logger.info("Page loading error!")
+            return False
+        if has_substr(coin_button.text, '登入'):
+            self.loginByCookie(cookie_name)
+            if not self.checkLogin():
+                coin_button.click()
+                input('Please login before proceed! Press <enter> to continue!')
+            else:
+                logger.debug( "Login by cookie!" )
+        if self.checkLogin():
+            logger.debug("Login successful!")
+            self.saveCookie(cookie_name)
+        else:
+            logger.info("Login failed!")
+            return False
+        return True
+
+    @contextmanager
+    def context(self):
+        try:
+            self.loggedin = self.login()
+            yield self
+        except Exception as e:
+            logger.error(repr(e))
+        finally:
+            self.driver.close()
+
+    def claimCoin(self):
+        coin_button = self.wait_until("css", "COIN_BUTTON")
+        if coin_button:
+            if has_substr(coin_button.text, '簽到'):
+                logger.info( "Claiming coin for today, " + coin_button.text )
+                coin_button.click()
+                coin_button = self.wait_until("css", "COIN_BUTTON")
+        else:
+            logger.info("Coin button not found!")
+            return False
+        coin_value = self.find("css", "COIN_VALUE")
+        if coin_value:
+            last_value = ''
+            # wait while the coin value counting
+            while coin_value.text != last_value:
+                last_value = coin_value.text
+                sleep(1)
+            logger.info("目前有 " + coin_value.text + " 蝦幣, " + coin_button.text)
+        else:
+            logger.info("Coin value not found!")
+            return False
+        return True
 
 if __name__ == "__main__":
-    Crawler().claimCoin()
+    with ShopeeWeb().context() as shopee:
+        if shopee.loggedin:
+            shopee.claimCoin()
 
