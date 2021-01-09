@@ -22,6 +22,15 @@ Then run:
 
     python main.py
 
+Command line arguments:
+
+    -h: Help
+    -d: enable debug mode
+    -f: disable file logging (enabled by default)
+    -n: enable headless mode (disabled by default)
+    -t: enable trace mode
+    -D: dry run
+
 ## License
 
 [MIT](https://choosealicense.com/licenses/mit/)

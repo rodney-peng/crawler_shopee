@@ -1,5 +1,5 @@
 import os
-import sys
+import sys, getopt
 import pickle
 import logging
 import datetime
@@ -14,8 +14,39 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.remote.webelement import WebElement
 
+def help():
+    print(
+        '''Arguments:
+        -h: Help
+        -d: enable debug mode
+        -f: disable file logging (enabled by default)
+        -n: enable headless mode (disabled by default)
+        -t: enable trace mode
+        -D: dry run
+        '''
+    )
+    sys.exit()
+
 from env import *
 def initConfigClass(config):
+    try:
+        opts, _ = getopt.getopt(sys.argv[1:], 'hdfntD')
+    except:
+        print('Warning: argument error!')
+        sys.exit(1)
+    for opt, _ in opts:
+        if opt == '-h':
+            help()
+        elif opt == '-d':
+            config.DEBUG = True
+        elif opt == '-f':
+            config.disableFileLogging = True
+        elif opt == '-n':
+            config.HEADLESS = True
+        elif opt == '-t':
+            config.TRACE = True
+        elif opt == '-D':
+            config.DRYRUN = True
     config.text_username = text_username
     config.text_password = text_password
     config.cookie_name = cookie_name
@@ -26,6 +57,10 @@ def initConfigClass(config):
 class Config:
 
     DEBUG = False
+    TRACE = False
+    DRYRUN = False
+    HEADLESS = False
+
     LOGGING_PATH = 'log'
     WAIT_TIMEOUT = 5
     configs = {
@@ -42,8 +77,8 @@ class Config:
         "GET_COIN": ".check-box .check-in-tip",
         "COIN_REGULAR": ".check-box .top-btn.Regular",
 
-        "COIN_VALUE": "._37aS8q",
-        "COIN_BUTTON": "._1Puh5H",
+        "COIN_VALUE": "p._37aS8q",
+        "COIN_BUTTON": "button._1Puh5H",
 
         "LOGIN_USER": "loginKey",
         "LOGIN_PASS": "password",
@@ -57,7 +92,12 @@ class Config:
     def get(cls, name):
         return cls.configs.get(name)
 
+    text_username = None
+    text_password = None
+    cookie_name = None
+
     logger = None
+    disableFileLogging = False
 
     @classmethod
     def init_logger(cls, name=None):
@@ -76,12 +116,44 @@ class Config:
         formatter = logging.Formatter('[%(filename)s:%(lineno)s - %(funcName)20s() ] %(asctime)s %(name)-12s %(levelname)-8s %(message)s')
         ch.setFormatter(formatter)
 
-        fh = logging.FileHandler(log_file)
-        fh.setFormatter(formatter)
-
         logger.addHandler(ch)
-        logger.addHandler(fh)
+
+        if not cls.disableFileLogging:
+            fh = logging.FileHandler(log_file)
+            fh.setFormatter(formatter)
+            logger.addHandler(fh)
+
         cls.logger = logger
+
+def traceCalling(logger=print):
+    def decorator(function):
+        if not Config.TRACE: return function
+        def wrapper(*args, **kwargs):
+            caller = inspect.currentframe().f_back.f_code.co_name
+            lineno = inspect.currentframe().f_back.f_lineno
+            result = function(*args, **kwargs)
+            _, *realargs = args # discard the 'self' argument
+            # realargs is a list not a tuple, TODO: beautify the case with single element
+            realargs = tuple(realargs)
+            logger(f'{caller}:{lineno} {function.__qualname__}{realargs} returned {result}')
+            return result
+        return wrapper
+    return decorator
+
+def dryrun(result):
+    def decorator(function):
+        if not Config.DRYRUN: return function
+#       @traceCalling()    # works but ugly: login:418 dryrun.<locals>.decorator.<locals>.wrapper('COIN_PAGE',) returned ...
+        def wrapper(*args, **kwargs):
+            caller = inspect.currentframe().f_back.f_code.co_name
+            lineno = inspect.currentframe().f_back.f_lineno
+            _, *realargs = args # discard the 'self' argument
+            # realargs is a list not a tuple, TODO: beautify the case with single element
+            realargs = tuple(realargs)
+            print(f'{caller}:{lineno} {function.__qualname__}{realargs} pretended {result}')
+            return result
+        return wrapper
+    return decorator
 
 
 class Driver(webdriver.Chrome):
@@ -129,14 +201,14 @@ class Driver(webdriver.Chrome):
             for cookie in pickle.load(filehandler):
                 self.add_cookie(cookie)
 
+    @traceCalling()
     def waitElementPresence(self, locator, timeout=5):
-        _, target = locator
         try:
             element = WebDriverWait(self, timeout).until(
                 EC.presence_of_element_located(locator)
             )
             if isinstance(element, WebElement):
-                self.logger.debug( f'Found <{element.tag_name} "{target}">{element.text}</>' )
+                self.logger.debug( f'"{repr(locator)}" located! text "{element.text}"' )
                 return element
 
         except TimeoutException:
@@ -150,18 +222,21 @@ class Driver(webdriver.Chrome):
 
 class Crawler:
 
-    config = Config()
+    config = Config
     logger = Config.logger
 
     def __init__(self):
-        self.driver = Driver(1200, 800, (not config.DEBUG) or (config.path == '/code'))
+        self.driver = Driver(1200, 800, (not self.config.DEBUG) or (self.config.path == '/code'))
 
+    @dryrun({'success': 0, 'value': None, 'sessionId': None})
     def getURL(self, name):
         return self.driver.get(self.config.get(name))
 
+    @traceCalling() # or logger.info
     def waitForClass(self, name):
         return self.driver.waitElementPresence((By.CSS_SELECTOR, self.config.get(name)), self.config.WAIT_TIMEOUT)
 
+    @traceCalling()
     def getByClass(self, name):
         return self.driver.find_element_by_css_selector(self.config.get(name))
 
@@ -188,7 +263,7 @@ class Crawler:
             self.waitForClass("AVATAR")
             self.logger.info("Login Success")
             return True
-        except Exception as e:
+        except:
             self.logger.info("Login Failed")
             return False
 
@@ -196,9 +271,9 @@ class Crawler:
         try:
             self.driver.loadCookie(self.config.cookie_name)
             self.driver.refresh()
-            self.logger.debug("Use {} to login".format(self.config.cookie_name))
-        except Exception as e:
-            self.logger.info("{} not found".format(self.config.cookie_name))
+            self.logger.debug(f'Use {self.config.cookie_name} to login!')
+        except:
+            self.logger.info(f'{self.config.cookie_name} not found!')
 
     def preloadCookie(self):
         try:
@@ -217,7 +292,7 @@ class Crawler:
     def saveCookie(self):
         try:
             self.driver.saveCookie(self.config.cookie_name)
-        except:
+        except Exception as e:
             self.logger.info(repr(e))
             self.logger.info(f'Failed to save cookie to "{self.config.cookie_name}"!')
 
@@ -336,8 +411,9 @@ def has_substr( string, substring ):
 class ShopeeWeb(Crawler):
 
     def __init__(self):
-        self.driver = Driver(1200, 800, False)
+        self.driver = Driver(1200, 800, self.config.HEADLESS)
 
+    @traceCalling() # Crawler.logger.info
     def waitLogin(self):
         return bool(self.waitForClass("AVATAR"))
 
@@ -398,4 +474,3 @@ if __name__ == "__main__":
     with ShopeeWeb().context() as shopee:
         if shopee.loggedin:
             shopee.claimCoin()
-
