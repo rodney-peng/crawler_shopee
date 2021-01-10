@@ -27,7 +27,6 @@ def help():
     )
     sys.exit()
 
-from env import *
 def initConfigClass(config):
     try:
         opts, _ = getopt.getopt(sys.argv[1:], 'hdfntD')
@@ -47,9 +46,12 @@ def initConfigClass(config):
             config.TRACE = True
         elif opt == '-D':
             config.DRYRUN = True
+
+    from env import text_username, text_password, cookie_name
     config.text_username = text_username
     config.text_password = text_password
     config.cookie_name = cookie_name
+
     config.init_logger()
     return config
 
@@ -125,32 +127,40 @@ class Config:
 
         cls.logger = logger
 
-def traceCalling(logger=print):
+
+def discardArgSelf(args):
+    _, *realargs = args # discard the first argument 'self'
+    # realargs is a list not a tuple, TODO: beautify the case of single element
+    return tuple(realargs)
+
+def printCaller(callerFrame, callingStr, printer):
+    caller = callerFrame.f_code.co_name
+    lineno = callerFrame.f_lineno
+    printer(f'{caller}:{lineno} {callingStr}')
+
+from functools import wraps
+
+def traceMethod(printer=print):
     def decorator(function):
         if not Config.TRACE: return function
+        @wraps(function)
         def wrapper(*args, **kwargs):
-            caller = inspect.currentframe().f_back.f_code.co_name
-            lineno = inspect.currentframe().f_back.f_lineno
             result = function(*args, **kwargs)
-            _, *realargs = args # discard the 'self' argument
-            # realargs is a list not a tuple, TODO: beautify the case with single element
-            realargs = tuple(realargs)
-            logger(f'{caller}:{lineno} {function.__qualname__}{realargs} returned {result}')
+            caller = inspect.currentframe().f_back
+            realargs = discardArgSelf(args)
+            printCaller(caller, f'{function.__qualname__}{realargs} returned {result}', printer)
             return result
         return wrapper
     return decorator
 
-def dryrun(result):
+def dryrunMethod(result=None):
     def decorator(function):
         if not Config.DRYRUN: return function
-#       @traceCalling()    # works but ugly: login:418 dryrun.<locals>.decorator.<locals>.wrapper('COIN_PAGE',) returned ...
+        @wraps(function)
         def wrapper(*args, **kwargs):
-            caller = inspect.currentframe().f_back.f_code.co_name
-            lineno = inspect.currentframe().f_back.f_lineno
-            _, *realargs = args # discard the 'self' argument
-            # realargs is a list not a tuple, TODO: beautify the case with single element
-            realargs = tuple(realargs)
-            print(f'{caller}:{lineno} {function.__qualname__}{realargs} pretended {result}')
+            caller = inspect.currentframe().f_back
+            realargs = discardArgSelf(args)
+            printCaller(caller, f'{function.__qualname__}{realargs} run dry, pretended {result}', print)
             return result
         return wrapper
     return decorator
@@ -163,8 +173,8 @@ class Driver(webdriver.Chrome):
     def __init__(self, width, height, headless=True):
 
         chrome_options = Options()
-        # Hide the chromedriver
         if headless:
+            # Hide the browser window
             chrome_options.add_argument('--headless')
             chrome_options.add_argument('--start-maximized')
             chrome_options.add_argument('disable-infobars')
@@ -201,7 +211,7 @@ class Driver(webdriver.Chrome):
             for cookie in pickle.load(filehandler):
                 self.add_cookie(cookie)
 
-    @traceCalling()
+    @traceMethod()
     def waitElementPresence(self, locator, timeout=5):
         try:
             element = WebDriverWait(self, timeout).until(
@@ -226,17 +236,19 @@ class Crawler:
     logger = Config.logger
 
     def __init__(self):
-        self.driver = Driver(1200, 800, (not self.config.DEBUG) or (self.config.path == '/code'))
+        headless = (not self.config.DEBUG) or (self.config.path == '/code')
+        self.driver = Driver(1200, 800, headless)
 
-    @dryrun({'success': 0, 'value': None, 'sessionId': None})
+    @dryrunMethod({'success': 0, 'value': None, 'sessionId': None})
+    @traceMethod() # or traceMethod(logger.info)
     def getURL(self, name):
         return self.driver.get(self.config.get(name))
 
-    @traceCalling() # or logger.info
+    @traceMethod()
     def waitForClass(self, name):
         return self.driver.waitElementPresence((By.CSS_SELECTOR, self.config.get(name)), self.config.WAIT_TIMEOUT)
 
-    @traceCalling()
+    @traceMethod()
     def getByClass(self, name):
         return self.driver.find_element_by_css_selector(self.config.get(name))
 
@@ -413,7 +425,7 @@ class ShopeeWeb(Crawler):
     def __init__(self):
         self.driver = Driver(1200, 800, self.config.HEADLESS)
 
-    @traceCalling() # Crawler.logger.info
+    @traceMethod() # Crawler.logger.info
     def waitLogin(self):
         return bool(self.waitForClass("AVATAR"))
 
@@ -470,7 +482,12 @@ class ShopeeWeb(Crawler):
             return False
         return True
 
-if __name__ == "__main__":
+# TODO: import click
+def main():
     with ShopeeWeb().context() as shopee:
         if shopee.loggedin:
             shopee.claimCoin()
+
+if __name__ == "__main__":
+    main()
+
