@@ -1,10 +1,14 @@
 import os
-import sys, getopt
+import sys
+import getopt
 import pickle
 import logging
 import datetime
 import inspect
-from time import gmtime, strftime, sleep
+from collections import abc
+from contextlib import contextmanager
+from time import gmtime, strftime, sleep, time
+
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, \
     StaleElementReferenceException, ElementClickInterceptedException
 from selenium import webdriver
@@ -24,17 +28,25 @@ def help():
         -n: enable headless mode (disabled by default)
         -t: enable trace mode
         -D: dry run
+        -s: run only the specified Shopee action
+            'execClaimCoin'
+            'execClaimCoupon'
+            'execListSales'
+        -m: run only the specified Momo action
+            'execDailyTask'
         '''
     )
     sys.exit()
 
 def initConfigClass(config):
     try:
-        opts, _ = getopt.getopt(sys.argv[1:], 'hdfntD')
+        validArgs = [a for a in sys.argv[1:] if a != '-']
+        opts, _ = getopt.getopt(validArgs, 'hdfntDs:m:')
     except:
         print('Warning: argument error!')
         sys.exit(1)
-    for opt, _ in opts:
+    for opt, arg in opts:
+        if config.TRACE: print(f'opt {opt} {arg}')
         if opt == '-h':
             help()
         elif opt == '-d':
@@ -47,6 +59,10 @@ def initConfigClass(config):
             config.TRACE = True
         elif opt == '-D':
             config.DRYRUN = True
+        elif opt == '-s':
+            config.Shopee = arg
+        elif opt == '-m':
+            config.Momo = arg
 
     config.init_logger()
     return config
@@ -89,6 +105,9 @@ class Config(object):
 
     logger = None
     disableFileLogging = False
+
+    Shopee = None
+    Momo = None
 
     @classmethod
     def init_logger(cls, name=None):
@@ -184,6 +203,11 @@ class trapMethod:
     def __call__(self, function):
         @wraps(function)
         def i_am_a_wrapper(*args, trapFunction=None, **kwargs):
+            if not trapFunction and isinstance(args, abc.Collection) \
+               and hasattr(args[0], 'trapFunction') and callable(args[0].trapFunction):
+                # use default trap function
+                trapFunction = args[0].trapFunction
+
             if trapFunction:
                 try:
                     return function(*args, **kwargs)
@@ -194,14 +218,16 @@ class trapMethod:
 
         return i_am_a_wrapper
 
+
 class CastClass:
 
     @classmethod
-    def quickCastFrom(cls, base):
+    def quickCast(cls, base):
         ''' only if no new variable is added in the derived class '''
         base.__class__ = cls
         return base
 
+    # TODO: Is it necessary? DerivedClass.__init__(self, base) is enough?
     @classmethod
     def castFrom(cls, base):
         derived = cls(base)
@@ -214,6 +240,7 @@ class CastClass:
 
         return derived
 
+
 class GuardedWebElement(WebElement, CastClass):
     ''' guard all find methods with @trapMethod() or @guardFindElement '''
 
@@ -223,19 +250,25 @@ class GuardedWebElement(WebElement, CastClass):
     @traceMethod()
     @trapMethod()
     def getByClass(self, selector, **kwargs):
-        return self.castFrom(self.find_element_by_css_selector(selector))
+        return GuardedWebElement(self.find_element_by_css_selector(selector))
 
     @traceMethod()
     @trapMethod()
     def getAllByClass(self, selector, **kwargs):
-        return [self.castFrom(e) for e in self.find_elements_by_css_selector(selector)]
+        return [GuardedWebElement(e) for e in self.find_elements_by_css_selector(selector)]
 
     @traceMethod()
     @trapMethod()
     def getById(self, id_, **kwargs):
-        return self.castFrom(self.find_element_by_id(id_))
+        return GuardedWebElement(self.find_element_by_id(id_))
+
 
 class Driver(webdriver.Chrome):
+
+    try:
+        TIMEOUT = Config.WAIT_TIMEOUT
+    except:
+        TIMEOUT = 5
 
     logger = Config.logger
 
@@ -284,45 +317,163 @@ class Driver(webdriver.Chrome):
         return self.get(url)
 
     @trapMethod()
+    def getByXPath(self, xpath, **kwargs):
+        return GuardedWebElement(self.find_element_by_xpath(xpath))
+
+    @trapMethod()
     def getByClass(self, selector, **kwargs):
-        return GuardedWebElement.castFrom(self.find_element_by_css_selector(selector))
+        return GuardedWebElement(self.find_element_by_css_selector(selector))
 
     @trapMethod()
     def getAllByClass(self, selector, **kwargs):
         elements = self.find_elements_by_css_selector(selector)
-        return [GuardedWebElement.castFrom(e) for e in elements]
+        return [GuardedWebElement(e) for e in elements]
 
-    def waitElementPresence(self, locator, timeout=5, timeoutMessage=''):
+    def waitElementPresence(self, locator, timeout=TIMEOUT, timeoutMessage=''):
         element = WebDriverWait(self, timeout).until(
             EC.presence_of_element_located(locator), timeoutMessage
         )
-        return GuardedWebElement.castFrom(element) if isinstance(element, WebElement) else element
+        return GuardedWebElement(element) if isinstance(element, WebElement) else element
 
     @trapMethod()
-    def waitForClass(self, selector, timeout=5, timeoutMessage='', **kwargs):
+    def waitForClass(self, selector, timeout=TIMEOUT, timeoutMessage='', **kwargs):
         return self.waitElementPresence((By.CSS_SELECTOR, selector), timeout, timeoutMessage)
 
-    def waitElementsPresence(self, locator, timeout=5, timeoutMessage=''):
+    @trapMethod()
+    def waitForXPath(self, xpath, timeout=TIMEOUT, timeoutMessage='', **kwargs):
+        return self.waitElementPresence((By.XPATH, xpath), timeout, timeoutMessage)
+
+    def waitElementsPresence(self, locator, timeout=TIMEOUT, timeoutMessage=''):
         elements = WebDriverWait(self, timeout).until(
             EC.presence_of_all_elements_located(locator), timeoutMessage
         )
         print(f'waitElementsPresence found {len(elements)} elements')
-        return [GuardedWebElement.castFrom(e) for e in elements]
+        return [GuardedWebElement(e) for e in elements]
 
     @trapMethod()
-    def waitAllForClass(self, selector, timeout=5, timeoutMessage='', **kwargs):
+    def waitAllForClass(self, selector, timeout=TIMEOUT, timeoutMessage='', **kwargs):
         return self.waitElementsPresence((By.CSS_SELECTOR, selector), timeout, timeoutMessage)
 
-    def waitElementsVisible(self, locator, timeout=5, timeoutMessage=''):
+    def waitElementsVisible(self, locator, timeout=TIMEOUT, timeoutMessage=''):
         elements = WebDriverWait(self, timeout).until(
             EC.visibility_of_any_elements_located(locator), timeoutMessage
         )
         print(f'waitElementsVisible found {len(elements)} elements')
-        return [GuardedWebElement.castFrom(e) for e in elements]
+        return [GuardedWebElement(e) for e in elements]
 
     @trapMethod()
-    def waitVisibleForClass(self, selector, timeout=5, timeoutMessage='', **kwargs):
+    def waitVisibleForClass(self, selector, timeout=TIMEOUT, timeoutMessage='', **kwargs):
         return self.waitElementsVisible((By.CSS_SELECTOR, selector), timeout, timeoutMessage)
+
+
+class BoundElement(WebElement):
+    '''
+    Bound with driver, method and target before wait/find, and with WebElement afterward.
+    An element can be re-used with reinit() and change only different arguments.
+    '''
+
+    try:
+        TIMEOUT = Config.WAIT_TIMEOUT
+    except:
+        TIMEOUT = 5
+
+    @traceMethod()
+    def __init__(self, driver, method, target, condition=EC.presence_of_element_located,
+                 timeout=TIMEOUT, message='', trapFunction=None):
+        self.reset(driver, method, target)
+        self.reset_condition(condition, timeout, message, trapFunction)
+
+    def reset(self, driver, method, target):
+        super().__init__(driver, None)
+        self.bound = False
+
+        self.driver = driver
+        self.method = method
+        self.target = target
+
+    def reset_condition(self, condition=EC.presence_of_element_located,
+                        timeout=TIMEOUT, message='', trapFunction=None):
+        super().__init__(self.driver, None)
+        self.bound = False
+
+        self.condition = condition
+        self.timeout = timeout
+        self.message = message
+
+        self.trapFunction = trapFunction
+
+    def reinit(self, target, method=None, driver=None,
+               condition=None, timeout=None, message=None, trapFunction=None):
+        ''' parameters are in reversed order of the __init__ method because of likelihood of reinitialization '''
+        self.target = target
+        if method: self.method = method
+        if driver: self.driver = driver
+        if condition: self.condition = condition
+        if timeout: self.timeout = timeout
+        if message: self.message = message
+        if trapFunction: self.trapFunction = trapFunction
+        self.bound = False
+        return self
+
+    def spawn(self, target, method=None, driver=None,
+              condition=None, timeout=None, message=None, trapFunction=None):
+        ''' spawn a new one with different attributes '''
+        return self.spawn_from(self).reinit(target, method, driver, condition, timeout, message, trapFunction)
+
+    @classmethod
+    def spawn_from(cls, base, element=None):
+        newElement = cls(base.driver, base.method, base.target, base.condition, base.timeout, base.message, base.trapFunction)
+        if element:
+            type(element).__init__(newElement, element._parent, element._id, element._w3c)
+            newElement.bound = True
+        return newElement
+
+    def bind_result(self, result):
+        if isinstance(result, abc.Collection):
+            return [self.spawn_from(self, e) for e in result]
+        elif isinstance(result, WebElement):
+            return self.spawn_from(self, result)
+        else:
+            return result
+
+    @traceMethod()
+    @trapMethod()
+    def wait(self, condition=None, timeout=None, message=None, **kwargs):
+        _condition = condition if condition else self.condition
+        _timeout = timeout if timeout else self.timeout
+        _message = message if message else self.message
+
+        result = WebDriverWait(self.driver, _timeout).until(
+                    _condition((self.method, self.target)), _message
+                )
+        return self.bind_result(result)
+
+    @traceMethod()
+    @trapMethod()
+    def find(self, target=None, method=None, **kwargs):
+        ''' target is first because of likelihood of change '''
+        if not target: target = self.target
+        if not method: method = self.method
+        if self.bound:
+            result = self.find_element(method, target)
+        else:
+            result = self.driver.find_element(method, target)
+
+        return self.bind_result(result)
+
+    @traceMethod()
+    @trapMethod()
+    def find_all(self, target=None, method=None, **kwargs):
+        ''' target is first because of likelihood of change '''
+        if not target: target = self.target
+        if not method: method = self.method
+        if self.bound:
+            result = self.find_elements(method, target)
+        else:
+            result = self.driver.find_elements(method, target)
+
+        return self.bind_result(result)
+
 
 class Crawler(object):
 
@@ -533,32 +684,29 @@ class Crawler(object):
         self.logger.info("Program exit")
         sys.exit(0)
 
-from contextlib import contextmanager
 
-def has_substr( string, substring ):
-    ''' str.find() doesn't work, convert to byte data and use keyword 'in'
-    if coin_button.text.find('登入'): True
-    if coin_button.text.find('領取'): True
-    if coin_button.text.find('簽到'): True
-    '''
-    return substring.encode('utf-8') in string.encode('utf-8')
-
-def catText(elements):
+def catText(elements, delimit=False):
     text = ''
     for element in elements:
         text += element.text.replace('\n', '')
+        if delimit and (text[-1] not in "，！。"): # these are UTF8's not ASCII's.
+            text += '，'
+    if text[-1] == '，': text = text[:-1]
     return text
 
 class ShopeeWeb(Crawler):
 
+    try:
+        TIMEOUT = Crawler.config.WAIT_TIMEOUT
+    except:
+        TIMEOUT = 5
+
     URL_COINS   = 'https://shopee.tw/shopee-coins'
     SEL_AVATAR  = 'div.shopee-avatar'
-    SEL_COIN_VALUE  = 'p._37aS8q'
-    SEL_COIN_BUTTON = 'button._1Puh5H'
+    XPATH_COIN_DIV = '//div[text()="蝦幣獎勵"]/..'
+    XPATH_COIN_VALUE  = XPATH_COIN_DIV + '/a/p'
+    XPATH_COIN_BUTTON = XPATH_COIN_DIV + '/button'
 
-#   'https://shopee.tw/m/sale-calendar?smtt=201.91065'
-#   'https://shopee.tw/m/free-shipping?smtt=9&deep_and_deferred=1&utm_content=FSV1&utm_source=sfmc&utm_medium=email'
-#   'https://shopee.tw/m/ShopeeCUBcobrandcard'
     URL_COUPONS = 'https://shopee.tw/m/seller-voucher?smtt=0.0.7'
     SEL_COUPON = 'div._3ubyiy'
 
@@ -595,10 +743,10 @@ class ShopeeWeb(Crawler):
         raise exception
 
     @traceMethod() # Crawler.logger.info
-    def waitLogin(self, timeout=Crawler.config.WAIT_TIMEOUT):
-        return bool(self.driver.waitForClass(self.SEL_AVATAR, timeout, trapFunction=self._trapTimeout))
+    def waitLogin(self, timeout=TIMEOUT):
+        return bool(BoundElement(self.driver, By.CSS_SELECTOR, self.SEL_AVATAR).wait(trapFunction=self._trapTimeout))
 
-    def login(self, url, timeout=Crawler.config.WAIT_TIMEOUT):
+    def login(self, url, timeout=TIMEOUT):
         ''' login by cookie or manually '''
         self.preloadCookie()
         self.driver.getURL(url)
@@ -616,7 +764,7 @@ class ShopeeWeb(Crawler):
         return True
 
     @contextmanager
-    def context(self, url, timeout=Crawler.config.WAIT_TIMEOUT):
+    def context(self, url, timeout=TIMEOUT):
         try:
             self.loggedin = self.login(url, timeout)
             yield self
@@ -624,20 +772,20 @@ class ShopeeWeb(Crawler):
             self.driver.quit()
 
     def claimCoin(self):
-        coin_button = self.driver.waitForClass(self.SEL_COIN_BUTTON, self.config.WAIT_TIMEOUT, trapFunction=self._trapTimeout)
+        coin_button = BoundElement(self.driver, By.XPATH, self.XPATH_COIN_BUTTON).wait(trapFunction=self._trapTimeout)
         if coin_button:
-            if has_substr(coin_button.text, '登入'):
+            if '登入' in coin_button.text:
                 coin_button.click()
                 input('Please login before proceed! Press <enter> to continue!')
-                coin_button = self.driver.waitForClass(self.SEL_COIN_BUTTON, self.config.WAIT_TIMEOUT, trapFunction=self._trapTimeout)
-            if has_substr(coin_button.text, '簽到'):
+                coin_button = coin_button.wait(trapFunction=self._trapTimeout)
+            if '簽到' in coin_button.text:
                 self.logger.info("Claiming coin for today, " + coin_button.text)
                 coin_button.click()
-                coin_button = self.driver.waitForClass(self.SEL_COIN_BUTTON, self.config.WAIT_TIMEOUT, trapFunction=self._trapTimeout)
+                coin_button = coin_button.wait(trapFunction=self._trapTimeout)
         else:
             self.logger.info("Coin button not found!")
             return False
-        coin_value = self.driver.getByClass(self.SEL_COIN_VALUE, trapFunction=self._trapNoSuchElement)
+        coin_value = coin_button.spawn(self.XPATH_COIN_VALUE).find(trapFunction=self._trapNoSuchElement)
         if coin_value:
             last_value = ''
             # wait while the coin value counting
@@ -669,6 +817,7 @@ class ShopeeWeb(Crawler):
     scrollTimes = 2
     scrollPeriod = 5 # seconds
     repeatTimes = int(scrollPeriod / (scrollPause * scrollTimes))
+    maxCoupons = 5
 
     def scrollDown(self):
         html = self.driver.find_element_by_tag_name('html')
@@ -706,21 +855,17 @@ class ShopeeWeb(Crawler):
                     print('No name, Keep going!')
                     return False
                 terms = details.getAllByClass('p')
-                if terms:
-                    terms = catText(terms)
-                else:
-                    # some coupons have no term
-                    terms = ''
+                # some coupons have no term, not an error
+                terms = catText(terms) if terms else ''
             else:
                 print('No term, Keep going!')
                 return False
             button = coupon.getByClass('button', trapFunction=self._trapNoSuchElement)
             if button:
                 print(f'{name} {terms} button {button.text}')
-                if not has_substr(button.text, '去逛逛'):
+                if '去逛逛' not in button.text:
                     try:
                         button.click()
-                        print('Button clicked!')
                     except ElementClickInterceptedException:
                         # seems ok here
                         # self.driver.execute_script("arguments[0].click();", button)
@@ -729,6 +874,8 @@ class ShopeeWeb(Crawler):
                         print('Button clicked by ActionChains!')
                     except Exception as e:
                         print(f'Click error, Keep going!\n{type(e)}\n{e}')
+                    else:
+                        print('Button clicked!')
             else:
                 text = coupon.getByClass('svg > g > text', trapFunction=self._trapNoSuchElement)
                 if text:
@@ -741,10 +888,13 @@ class ShopeeWeb(Crawler):
         good = 0
         for coupon in coupons:
             try:
+                # try to catch any WebElement exception, even access of "element.text" may throw an exception
+                # as the page and elements are really dynamic
                 claim(self, coupon)
-                good += 1
             except:
                 print('Exception, Keep going!')
+            else:
+                good += 1
 
         return good
 
@@ -754,20 +904,17 @@ class ShopeeWeb(Crawler):
             name = i.getByClass('div.flash-sale-item-card__item-name').text
             price = i.getByClass('div.flash-sale-item-card__current-price').text
             soldout = i.getByClass('div.flash-sale-sold-out', trapFunction=self._trapNoSuchElement)
-            if soldout:
-                soldout = soldout.text
-            else:
-                soldout = ''
+            soldout = soldout.text if soldout else ''
             print(f'{name}\t{price}\t{soldout}')
         print(f'got {len(items)} items')
 
-    def listCurrentSales(self, url=URL_HOME):
+    def listSales(self, url=URL_HOME):
         self.driver.getURL(url)
-        button = self.driver.waitForClass('div.shopee-popup__close-btn', 2, trapFunction=self._trapWaitGet)
+        button = BoundElement(self.driver, By.CSS_SELECTOR, 'div.shopee-popup__close-btn', trapFunction=self._trapWaitGet).wait(timeout=2)
         if button:
             sleep(1)
             button.click() # close popup
-        button = self.driver.waitForClass('div.shopee-flash-sale-overview-carousel button', 1, trapFunction=self._trapWaitGet)
+        button = button.reinit('div.shopee-flash-sale-overview-carousel button').wait(timeout=1)
         if button: button.click()
 
         # wait for the first item
@@ -808,6 +955,7 @@ class ShopeeWeb(Crawler):
         with self.context(self.URL_COINS):
             if self.loggedin:
                 self.claimCoin()
+                input('Press <enter> to close!')
 
     def execClaimCoupon(self, url=None):
         if not url: url = self.URL_COUPONS
@@ -820,7 +968,8 @@ class ShopeeWeb(Crawler):
                     last_found = -1
                     found = 0
                     repeat = 0
-                    while found != last_found or repeat < self.repeatTimes:
+                    while (self.maxCoupons <= 0 or found < self.maxCoupons) and \
+                          (found != last_found or repeat < self.repeatTimes):
                         print('\n')
                         self.scrollDown()
                         found = self.claimCoupon()
@@ -837,9 +986,9 @@ class ShopeeWeb(Crawler):
                     elif cmd:
                         break
 
-    def execListCurrentSales(self, url=URL_HOME):
+    def execListSales(self, url=URL_HOME):
         try:
-            self.listCurrentSales(url)
+            self.listSales(url)
         finally:
             self.driver.quit()
 
@@ -862,7 +1011,7 @@ class MomoWeb(Crawler):
         self.cookie = 'cookie-momo.pkl'
 
     @classmethod
-    def _trap(cls, *args, **kwargs):
+    def _raise(cls, *args, **kwargs):
         function  = kwargs.pop('function_')
         exception = kwargs.pop('exception_')
         caller = stripWrapper(inspect.currentframe().f_back)
@@ -870,32 +1019,42 @@ class MomoWeb(Crawler):
         printCaller(caller, f'{function.__qualname__}{realargs} failed, exit!', print)
         raise exception
 
+    @classmethod
+    def _trapTimeout(cls, *args, **kwargs):
+        #function  = kwargs.pop('function_')
+        exception = kwargs.pop('exception_')
+        #caller = stripWrapper(inspect.currentframe().f_back)
+        #realargs = discardArgSelf(args, kwargs)
+        if isinstance(exception, TimeoutException):
+            return False
+        raise exception
+
     def dailyTask(self):
         ''' returned element/elements is/are not verified as any exception exits the execution. '''
 
         self.driver.getURL(self.URL_HOME)
-        task_ref = self.driver.waitForClass(self.SEL_DAILYTASK1, self.config.WAIT_TIMEOUT, trapFunction=self._trap)
+        task_ref = BoundElement(self.driver, By.CSS_SELECTOR, self.SEL_DAILYTASK1, trapFunction=self._raise).wait()
 
         sleep(1)
         task_ref.click()
-        task_ref = self.driver.waitForClass(self.SEL_DAILYTASK2, self.config.WAIT_TIMEOUT, trapFunction=self._trap)
+        task_ref = task_ref.reinit(self.SEL_DAILYTASK2).wait()
 
         sleep(1)
         task_ref.click()
-        task_area = self.driver.waitForClass(self.SEL_DAILYTASKAREA1, self.config.WAIT_TIMEOUT, trapFunction=self._trap)
+        task_area = task_ref.reinit(self.SEL_DAILYTASKAREA1).wait()
 
-        sec = task_area.getById('sec', trapFunction=self._trap)
+        sec = task_area.find('sec', By.ID)
         last_value = ''
         # wait while the second ticking
         while sec.text != last_value:
             last_value = sec.text
             sleep(1)
 
-        loginDiv = self.driver.waitForClass('div#ajaxLogin', self.config.WAIT_TIMEOUT, trapFunction=self._trap)
-        username    = loginDiv.getByClass('input#memId', trapFunction=self._trap)
-        passwdShow  = loginDiv.getByClass('input#passwd_show', trapFunction=self._trap)
-        password    = loginDiv.getByClass('input#passwd', trapFunction=self._trap)
-        loginButton = loginDiv.getByClass('dd.loginBtn > input', trapFunction=self._trap)
+        loginDiv = task_ref.reinit('div#ajaxLogin').wait()
+        username    = loginDiv.find('input#memId')
+        passwdShow  = loginDiv.find('input#passwd_show')
+        password    = loginDiv.find('input#passwd')
+        loginButton = loginDiv.find('dd.loginBtn > input')
 
         sleep(1)
         username.click()
@@ -910,10 +1069,10 @@ class MomoWeb(Crawler):
         sleep(1)
         loginButton.click()
 
-        task_area = self.driver.waitForClass(self.SEL_DAILYTASKAREA2, self.config.WAIT_TIMEOUT, trapFunction=self._trap)
-        self.driver.waitForClass(self.SEL_DAILYTASKAREA2 + ' > div.dayon', self.config.WAIT_TIMEOUT, trapFunction=self._trap)
-        titles = task_area.getAllByClass('p.title', trapFunction=self._trap)
-        self.logger.info(catText(titles))
+        task_area = task_ref.reinit(self.SEL_DAILYTASKAREA2).wait()
+        task_ref.reinit(self.SEL_DAILYTASKAREA2 + ' > div.dayon').wait(trapFunction=self._trapTimeout)
+        titles = task_area.find_all('p.title')
+        self.logger.info(catText(titles, True))
 
         # TODO: check the prize
         input('Press <enter> to close!')
@@ -929,8 +1088,13 @@ class MomoWeb(Crawler):
 
 # TODO: import click
 def main():
-    ShopeeWeb().run()
-    MomoWeb().run()
+    if Config.Shopee:
+        eval(f'ShopeeWeb().{Config.Shopee}()')
+    elif Config.Momo:
+        eval(f'MomoWeb().{Config.Momo}()')
+    else:
+        ShopeeWeb().run()
+        MomoWeb().run()
 
 if __name__ == "__main__":
     main()
